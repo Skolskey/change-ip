@@ -21,7 +21,11 @@ No rollback: `... | TIMEOUT=0 sh`. Backup and log: `/root/ip-change-<date>/`.
 The guest needs no network and no token: the script is passed through the agent.
 Non-interactive mode: `change-ip.sh <old-ip> <new-ip> [gateway]`, gateway defaults to the suggested one, no rollback.
 
-Once on the hypervisor (username: anything, password: the token):
+**One line, nothing installed on the hypervisor:** copy `qga-oneliner.txt`, edit `VM= OLD= NEW= GW=` at the start
+(empty `GW` = suggested gateway), paste into the hypervisor shell. The script is embedded as base64.
+After changing `change-ip.sh`, run `./make-oneliner.sh` to rebuild it.
+
+**Or keep the repo on the hypervisor** (username: anything, password: the token):
 
 ```bash
 git clone https://github.com/Skolskey/change-ip.git /root/change-ip
