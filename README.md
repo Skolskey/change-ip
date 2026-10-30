@@ -44,3 +44,13 @@ qm guest exec <vmid> --pass-stdin 1 -- /bin/sh -s -- <old-ip> <new-ip> [gateway]
 ```
 
 RHEL/Alma/Rocky guests block `guest-exec` by default: remove it from the deny list in `/etc/sysconfig/qemu-ga` and restart `qemu-guest-agent`.
+
+**Panel "Qemu Agent Command" field (raw agent JSON):**
+
+- `qga-json.txt` — script embedded, no token, ~10 KB. Edit `"1.2.3.4","5.6.7.8",""` (old, new, gateway).
+- `qga-json-git.txt` — short, downloads from GitHub. Replace `OLD_IP NEW_IP` and `TOKEN_B64` with
+  `printf '%s' 'github_pat_...' | base64`. The token goes via stdin (`input-data`), so it is not in qemu-ga logs or `ps`,
+  but the panel itself may store the command.
+
+Output: the reply contains `{"pid":N}`; then send `{"execute":"guest-exec-status","arguments":{"pid":N}}`
+(`out-data` is base64). Full log in the guest: `/root/ip-change-<date>/log`.

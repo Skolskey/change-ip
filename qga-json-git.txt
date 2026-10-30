@@ -1,0 +1,1 @@
+{"execute":"guest-exec","arguments":{"path":"/bin/sh","arg":["-c","read -r T; printf 'header = \"Authorization: Bearer %s\"\\n' \"$T\" | curl -fsSL -K - -H 'Accept: application/vnd.github.raw' https://api.github.com/repos/Skolskey/change-ip/contents/change-ip.sh | sh -s -- OLD_IP NEW_IP ''"],"capture-output":true,"input-data":"TOKEN_B64"}}
