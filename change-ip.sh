@@ -10,6 +10,7 @@ PATHS="/etc/network/interfaces /etc/network/interfaces.d /etc/netplan
 
 die() { echo "Error: $*" >&2; exit 1; }
 ask() { printf '%s' "$1" >/dev/tty; read -r v </dev/tty; printf '%s' "$v"; }
+lc() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
 valid_ip() {
   echo "$1" | awk -F. 'NF==4 { for (i=1;i<=4;i++) if ($i !~ /^[0-9][0-9]?[0-9]?$/ || $i > 255) exit 1; exit 0 } { exit 1 }'
 }
@@ -119,7 +120,7 @@ command -v ping >/dev/null 2>&1 && ping -c1 -W1 "$NEW" >/dev/null 2>&1 && echo "
 [ -d /etc/cloud ] && [ ! -f /etc/cloud/cloud-init.disabled ] &&
   echo "WARNING: cloud-init may restore the old network config on reboot"
 
-[ "$(ask "Apply? [y/N]: ")" = y ] || die "cancelled"
+case $(lc "$(ask "Apply? [y/N]: ")") in y|yes) ;; *) die "cancelled" ;; esac
 
 tar -C / -cf "$BK/backup.tar" -T "$BK/files" 2>/dev/null || die "backup failed"
 while IFS= read -r f; do sed -i -E "$SED" "$f"; done < "$BK/files"
@@ -138,13 +139,14 @@ while [ ! -f "$BK/applied" ]; do sleep 1; done
 ip -o -4 addr show scope global | awk '{ print "  " $2, $4 }'
 [ "$TIMEOUT" -eq 0 ] && exit 0
 
-ans=$(ask "Keep new settings? Press ENTER to accept, n to roll back (auto-rollback in ${TIMEOUT}s): ")
-if [ -f "$BK/done" ]; then
-  echo "Too late: $(cat "$BK/done")"; exit 1
-elif [ "$ans" = n ] || [ "$ans" = N ]; then
-  touch "$BK/revert"
-else
-  touch "$OK_FILE"
-fi
+echo "Auto-rollback in ${TIMEOUT}s. From another session (e.g. via $NEW) you can also confirm with: touch $OK_FILE"
+while :; do
+  ans=$(lc "$(ask "Keep new settings? [Y/n]: ")")
+  [ -f "$BK/done" ] && { echo "Too late: $(cat "$BK/done")"; exit 1; }
+  case $ans in
+    ""|y|yes) touch "$OK_FILE"; break ;;
+    n|no) touch "$BK/revert"; break ;;
+  esac
+done
 while [ ! -f "$BK/done" ]; do sleep 1; done
 cat "$BK/done"
