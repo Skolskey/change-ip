@@ -1,6 +1,7 @@
 #!/bin/sh
 # Replace an IPv4 address (and gateway) in network configs, restart networking, auto-rollback.
-# Usage: see README (private repo, curl with token). TIMEOUT=0 disables rollback.
+# Usage: curl -fsSL https://raw.githubusercontent.com/Skolskey/change-ip/main/change-ip.sh | sh
+# TIMEOUT=0 disables rollback.
 # Non-interactive (e.g. via qemu guest agent): change-ip.sh <old-ip> <new-ip> [gateway]
 #   no prompts, gateway defaults to the suggested one, rollback off unless TIMEOUT is set.
 

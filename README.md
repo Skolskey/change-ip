@@ -2,13 +2,9 @@
 
 Replaces an IPv4 address (and gateway) in Linux network configs, restarts networking, rolls back automatically if not confirmed.
 
-Private repo, download with a read-only token:
-
 ```bash
-read -rs T; curl -fsSL -H "Authorization: Bearer $T" -H "Accept: application/vnd.github.raw" https://api.github.com/repos/Skolskey/change-ip/contents/change-ip.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Skolskey/change-ip/main/change-ip.sh | sh
 ```
-
-`read -rs T` — paste the token (hidden, not saved to history).
 
 Supports ifupdown, netplan, NetworkManager (keyfile and ifcfg), systemd-networkd, wicked, OpenRC.
 
@@ -16,41 +12,27 @@ After the network restarts, press ENTER to keep the new settings or `n` to roll 
 If the session drops, log in via the new IP within 180 s and run `touch /root/.ip-change-ok`, otherwise configs are rolled back.
 No rollback: `... | TIMEOUT=0 sh`. Backup and log: `/root/ip-change-<date>/`.
 
-## Via qemu guest agent (from the hypervisor)
+Non-interactive: `... | sh -s -- <old-ip> <new-ip> [gateway]` — no prompts, gateway defaults to the suggested one, no rollback.
 
-The guest needs no network and no token: the script is passed through the agent.
-Non-interactive mode: `change-ip.sh <old-ip> <new-ip> [gateway]`, gateway defaults to the suggested one, no rollback.
+raw.githubusercontent.com caches files for ~5 minutes after a push.
 
-**One line, nothing installed on the hypervisor:** copy `qga-oneliner.txt`, edit `VM= OLD= NEW= GW=` at the start
-(empty `GW` = suggested gateway), paste into the hypervisor shell. The script is embedded as base64.
-After changing `change-ip.sh`, run `./make-oneliner.sh` to rebuild it.
-
-**Or keep the repo on the hypervisor** (username: anything, password: the token):
-
-```bash
-git clone https://github.com/Skolskey/change-ip.git /root/change-ip
-```
-
-libvirt / virsh:
-
-```bash
-/root/change-ip/qga-change-ip.sh <domain> <old-ip> <new-ip> [gateway]
-```
-
-Proxmox:
-
-```bash
-qm guest exec <vmid> --pass-stdin 1 -- /bin/sh -s -- <old-ip> <new-ip> [gateway] < /root/change-ip/change-ip.sh
-```
-
-RHEL/Alma/Rocky guests block `guest-exec` by default: remove it from the deny list in `/etc/sysconfig/qemu-ga` and restart `qemu-guest-agent`.
+## Via qemu guest agent
 
 **Panel "Qemu Agent Command" field (raw agent JSON):**
 
-- `qga-json.txt` — script embedded, no token, ~10 KB. Edit `"1.2.3.4","5.6.7.8",""` (old, new, gateway).
-- `qga-json-git.txt` — short, downloads from GitHub. Replace `OLD_IP NEW_IP` and `TOKEN_B64` with
-  `printf '%s' 'github_pat_...' | base64`. The token goes via stdin (`input-data`), so it is not in qemu-ga logs or `ps`,
-  but the panel itself may store the command.
+- `qga-json-git.txt` — short, the guest downloads the script (needs internet). Replace `OLD_IP NEW_IP`;
+  `''` is the gateway (empty = suggested).
+- `qga-json.txt` — script embedded, guest needs no network, ~10 KB. Edit `"1.2.3.4","5.6.7.8",""` (old, new, gateway).
 
-Output: the reply contains `{"pid":N}`; then send `{"execute":"guest-exec-status","arguments":{"pid":N}}`
+The reply contains `{"pid":N}`; then send `{"execute":"guest-exec-status","arguments":{"pid":N}}`
 (`out-data` is base64). Full log in the guest: `/root/ip-change-<date>/log`.
+
+**Hypervisor shell:**
+
+- libvirt, nothing installed: copy `qga-oneliner.txt`, edit `VM= OLD= NEW= GW=` at the start, paste.
+- libvirt with the repo cloned: `qga-change-ip.sh <domain> <old-ip> <new-ip> [gateway]`.
+- Proxmox: `qm guest exec <vmid> --pass-stdin 1 -- /bin/sh -s -- <old-ip> <new-ip> < change-ip.sh`
+
+After changing `change-ip.sh`, run `./make-oneliner.sh` to rebuild `qga-json.txt` and `qga-oneliner.txt`.
+
+RHEL/Alma/Rocky guests block `guest-exec` by default: remove it from the deny list in `/etc/sysconfig/qemu-ga` and restart `qemu-guest-agent`.
