@@ -129,7 +129,14 @@ command -v ping >/dev/null 2>&1 && ping -c1 -W1 "$NEW" >/dev/null 2>&1 && echo "
 [ -n "$BATCH" ] || case $(lc "$(ask "Apply? [y/N]: ")") in y|yes) ;; *) die "cancelled" ;; esac
 
 tar -C / -cf "$BK/backup.tar" -T "$BK/files" 2>/dev/null || die "backup failed"
-while IFS= read -r f; do sed -i -E "$SED" "$f"; done < "$BK/files"
+while IFS= read -r f; do
+  sed -i -E "$SED" "$f"
+  # NEW may already be a secondary address: drop the duplicate netplan list entry
+  case $f in /etc/netplan/*)
+    awk -v ip="$NEW" '!(index($0, ip) && /^[[:space:]]*-/ && seen[$0]++)' "$f" > "$f.tmp" &&
+      cat "$f.tmp" > "$f"; rm -f "$f.tmp" ;;
+  esac
+done < "$BK/files"
 rm -f "$OK_FILE"
 
 # ponytail: trap HUP keeps the worker alive after SSH drops; KillUserProcesses=yes would need systemd-run
