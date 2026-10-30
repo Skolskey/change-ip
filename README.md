@@ -15,3 +15,28 @@ Supports ifupdown, netplan, NetworkManager (keyfile and ifcfg), systemd-networkd
 After the network restarts, press ENTER to keep the new settings or `n` to roll back.
 If the session drops, log in via the new IP within 180 s and run `touch /root/.ip-change-ok`, otherwise configs are rolled back.
 No rollback: `... | TIMEOUT=0 sh`. Backup and log: `/root/ip-change-<date>/`.
+
+## Via qemu guest agent (from the hypervisor)
+
+The guest needs no network and no token: the script is passed through the agent.
+Non-interactive mode: `change-ip.sh <old-ip> <new-ip> [gateway]`, gateway defaults to the suggested one, no rollback.
+
+Once on the hypervisor (username: anything, password: the token):
+
+```bash
+git clone https://github.com/Skolskey/change-ip.git /root/change-ip
+```
+
+libvirt / virsh:
+
+```bash
+/root/change-ip/qga-change-ip.sh <domain> <old-ip> <new-ip> [gateway]
+```
+
+Proxmox:
+
+```bash
+qm guest exec <vmid> --pass-stdin 1 -- /bin/sh -s -- <old-ip> <new-ip> [gateway] < /root/change-ip/change-ip.sh
+```
+
+RHEL/Alma/Rocky guests block `guest-exec` by default: remove it from the deny list in `/etc/sysconfig/qemu-ga` and restart `qemu-guest-agent`.

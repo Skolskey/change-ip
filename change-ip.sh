@@ -1,7 +1,12 @@
 #!/bin/sh
 # Replace an IPv4 address (and gateway) in network configs, restart networking, auto-rollback.
 # Usage: see README (private repo, curl with token). TIMEOUT=0 disables rollback.
+# Non-interactive (e.g. via qemu guest agent): change-ip.sh <old-ip> <new-ip> [gateway]
+#   no prompts, gateway defaults to the suggested one, rollback off unless TIMEOUT is set.
 
+PATH=$PATH:/usr/sbin:/sbin
+BATCH=; [ $# -ge 2 ] && BATCH=1
+[ -n "$BATCH" ] && TIMEOUT=${TIMEOUT:-0}
 TIMEOUT=${TIMEOUT:-180}
 OK_FILE=/root/.ip-change-ok
 PATHS="/etc/network/interfaces /etc/network/interfaces.d /etc/netplan
@@ -79,14 +84,15 @@ worker() {
 }
 
 [ "$(id -u)" -eq 0 ] || die "must be run as root"
-[ -r /dev/tty ] || die "interactive terminal required"
+[ -n "$BATCH" ] || ( : </dev/tty ) 2>/dev/null ||
+  die "interactive terminal required (or pass: <old-ip> <new-ip> [gateway])"
 command -v ip >/dev/null 2>&1 || die "'ip' command not found (install iproute2)"
 
 echo "Current addresses:"; ip -o -4 addr show scope global | awk '{ print "  " $2, $4 }'
 echo "Default route: $(ip -4 route show default | head -n1)"
 
-OLD=$(ask "IP to replace: "); valid_ip "$OLD" || die "invalid IP: $OLD"
-NEW=$(ask "New IP: ");        valid_ip "$NEW" || die "invalid IP: $NEW"
+OLD=${1:-$(ask "IP to replace: ")}; valid_ip "$OLD" || die "invalid IP: $OLD"
+NEW=${2:-$(ask "New IP: ")};        valid_ip "$NEW" || die "invalid IP: $NEW"
 [ "$OLD" != "$NEW" ] || die "IPs are the same"
 
 # suggest a gateway: same subnet -> keep current, otherwise first host of the new subnet
@@ -98,7 +104,7 @@ if [ "$PFX" -ge 31 ] || [ "$(subnet "$OLD" "$PFX" 0)" = "$(subnet "$NEW" "$PFX" 
 else
   SGW=$(subnet "$NEW" "$PFX" 1)
 fi
-NGW=$(ask "New gateway [${SGW:-none}]: "); NGW=${NGW:-$SGW}
+if [ -n "$BATCH" ]; then NGW=${3:-$SGW}; else NGW=$(ask "New gateway [${SGW:-none}]: "); NGW=${NGW:-$SGW}; fi
 [ -z "$NGW" ] || valid_ip "$NGW" || die "invalid gateway: $NGW"
 [ -n "$NGW" ] && [ -z "$OGW" ] && echo "WARNING: no current default route, gateway won't be changed"
 
@@ -120,7 +126,7 @@ command -v ping >/dev/null 2>&1 && ping -c1 -W1 "$NEW" >/dev/null 2>&1 && echo "
 [ -d /etc/cloud ] && [ ! -f /etc/cloud/cloud-init.disabled ] &&
   echo "WARNING: cloud-init may restore the old network config on reboot"
 
-case $(lc "$(ask "Apply? [y/N]: ")") in y|yes) ;; *) die "cancelled" ;; esac
+[ -n "$BATCH" ] || case $(lc "$(ask "Apply? [y/N]: ")") in y|yes) ;; *) die "cancelled" ;; esac
 
 tar -C / -cf "$BK/backup.tar" -T "$BK/files" 2>/dev/null || die "backup failed"
 while IFS= read -r f; do sed -i -E "$SED" "$f"; done < "$BK/files"
@@ -138,6 +144,7 @@ echo "Restarting network..."
 while [ ! -f "$BK/applied" ]; do sleep 1; done
 ip -o -4 addr show scope global | awk '{ print "  " $2, $4 }'
 [ "$TIMEOUT" -eq 0 ] && exit 0
+[ -n "$BATCH" ] && { echo "Confirm within ${TIMEOUT}s: touch $OK_FILE"; exit 0; }
 
 echo "Auto-rollback in ${TIMEOUT}s. From another session (e.g. via $NEW) you can also confirm with: touch $OK_FILE"
 while :; do
