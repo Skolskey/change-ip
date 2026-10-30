@@ -1,7 +1,6 @@
 #!/bin/sh
-# Замена IPv4 в сетевых конфигах + перезапуск сети с авто-откатом.
-# Запуск: см. README (приватный репо, curl с токеном)
-# TIMEOUT=0 — без авто-отката.
+# Replace an IPv4 address (and gateway) in network configs, restart networking, auto-rollback.
+# Usage: see README (private repo, curl with token). TIMEOUT=0 disables rollback.
 
 TIMEOUT=${TIMEOUT:-180}
 OK_FILE=/root/.ip-change-ok
@@ -9,17 +8,23 @@ PATHS="/etc/network/interfaces /etc/network/interfaces.d /etc/netplan
 /etc/sysconfig/network-scripts /etc/sysconfig/network /etc/NetworkManager/system-connections
 /etc/systemd/network /etc/conf.d/net /etc/hosts"
 
-die() { echo "Ошибка: $*" >&2; exit 1; }
+die() { echo "Error: $*" >&2; exit 1; }
 ask() { printf '%s' "$1" >/dev/tty; read -r v </dev/tty; printf '%s' "$v"; }
 valid_ip() {
   echo "$1" | awk -F. 'NF==4 { for (i=1;i<=4;i++) if ($i !~ /^[0-9][0-9]?[0-9]?$/ || $i > 255) exit 1; exit 0 } { exit 1 }'
 }
-# IP целиком, чтобы 1.2.3.4 не цеплял 1.2.3.40 и 11.2.3.4
+# network address of $1/$2 plus offset $3 (0 = network, 1 = first host)
+subnet() {
+  echo "$1 $2 $3" | awk '{ split($1, o, "."); n = ((o[1]*256 + o[2])*256 + o[3])*256 + o[4]
+    b = 2 ^ (32 - $2); n = int(n / b) * b + $3
+    printf "%d.%d.%d.%d", int(n/16777216), int(n/65536) % 256, int(n/256) % 256, n % 256 }'
+}
+# whole IP only, so 1.2.3.4 doesn't match 1.2.3.40 or 11.2.3.4
 re() { printf '(^|[^0-9.])%s([^0-9.]|$)' "$(printf '%s' "$1" | sed 's/\./\\./g')"; }
-# дважды: соседние вхождения ("ip,ip") делят разделитель
+# applied twice: adjacent matches ("ip,ip") share the separator
 subst() { s="s/$(re "$1")/\\1$2\\2/g"; printf '%s;%s' "$s" "$s"; }
 
-# снять IP с интерфейса (иначе ifupdown оставит старый адрес и маршрут)
+# remove IP from its interface (otherwise ifupdown keeps the old address and route)
 drop_ip() {
   ip -o -4 addr show | awk -v ip="$1" '{ split($4, a, "/"); sub(/@.*/, "", $2) } a[1] == ip { print $2, $4 }' |
   while read -r dev cidr; do
@@ -32,7 +37,7 @@ restart_net() {
   if command -v netplan >/dev/null 2>&1 && ls /etc/netplan/*.yaml >/dev/null 2>&1; then
     netplan apply
   fi
-  # и после netplan: у него может быть renderer NetworkManager с keyfile'ами вне /etc/netplan
+  # also after netplan: its NetworkManager renderer may use keyfiles outside /etc/netplan
   if systemctl is-active --quiet NetworkManager 2>/dev/null; then
     nmcli connection reload
     nmcli -g UUID connection show --active | while read -r c; do nmcli connection up "$c"; done
@@ -51,37 +56,50 @@ restart_net() {
   fi
 }
 
+# runs detached; talks to the foreground via files in $BK: applied, revert, done
 worker() {
   sleep 2
-  date; echo "Применяю $OLD -> $NEW"
+  date; echo "Applying $OLD -> $NEW"
   drop_ip "$OLD"; restart_net
   ip -o -4 addr show scope global
-  [ "$TIMEOUT" -eq 0 ] && return
+  touch "$BK/applied"
+  [ "$TIMEOUT" -eq 0 ] && { echo "applied, rollback disabled" > "$BK/done"; return; }
   i=0
-  while [ "$i" -lt "$TIMEOUT" ]; do
-    [ -f "$OK_FILE" ] && { rm -f "$OK_FILE"; echo "Подтверждено"; return; }
+  while [ "$i" -lt "$TIMEOUT" ] && [ ! -f "$BK/revert" ]; do
+    [ -f "$OK_FILE" ] && { rm -f "$OK_FILE"; echo "Confirmed, new settings kept" | tee "$BK/done"; return; }
     sleep 1; i=$((i + 1))
   done
-  echo "Нет подтверждения за ${TIMEOUT}с — откат"
+  echo "Rolling back"
   drop_ip "$NEW"
   tar -C / -xf "$BK/backup.tar"
   restart_net
   ip -o -4 addr show scope global
+  echo "Rolled back to $OLD" | tee "$BK/done"
 }
 
-[ "$(id -u)" -eq 0 ] || die "нужен root"
-[ -r /dev/tty ] || die "нужен интерактивный терминал"
-command -v ip >/dev/null 2>&1 || die "нет утилиты ip (iproute2)"
+[ "$(id -u)" -eq 0 ] || die "must be run as root"
+[ -r /dev/tty ] || die "interactive terminal required"
+command -v ip >/dev/null 2>&1 || die "'ip' command not found (install iproute2)"
 
-echo "Текущие адреса:"; ip -o -4 addr show scope global | awk '{ print "  " $2, $4 }'
-echo "Шлюз: $(ip -4 route show default | head -n1)"
+echo "Current addresses:"; ip -o -4 addr show scope global | awk '{ print "  " $2, $4 }'
+echo "Default route: $(ip -4 route show default | head -n1)"
 
-OLD=$(ask "Какой IP заменить: "); valid_ip "$OLD" || die "неверный IP: $OLD"
-NEW=$(ask "На какой IP: ");       valid_ip "$NEW" || die "неверный IP: $NEW"
-[ "$OLD" != "$NEW" ] || die "IP совпадают"
+OLD=$(ask "IP to replace: "); valid_ip "$OLD" || die "invalid IP: $OLD"
+NEW=$(ask "New IP: ");        valid_ip "$NEW" || die "invalid IP: $NEW"
+[ "$OLD" != "$NEW" ] || die "IPs are the same"
+
+# suggest a gateway: same subnet -> keep current, otherwise first host of the new subnet
 OGW=$(ip -4 route show default | awk '{ print $3; exit }')
-NGW=$(ask "Новый шлюз [Enter — не менять ${OGW}]: ")
-[ -z "$NGW" ] || valid_ip "$NGW" || die "неверный шлюз: $NGW"
+PFX=$(ip -o -4 addr show | awk -v ip="$OLD" '{ split($4, a, "/") } a[1] == ip { print a[2]; exit }')
+PFX=${PFX:-24}
+if [ "$PFX" -ge 31 ] || [ "$(subnet "$OLD" "$PFX" 0)" = "$(subnet "$NEW" "$PFX" 0)" ]; then
+  SGW=$OGW
+else
+  SGW=$(subnet "$NEW" "$PFX" 1)
+fi
+NGW=$(ask "New gateway [${SGW:-none}]: "); NGW=${NGW:-$SGW}
+[ -z "$NGW" ] || valid_ip "$NGW" || die "invalid gateway: $NGW"
+[ -n "$NGW" ] && [ -z "$OGW" ] && echo "WARNING: no current default route, gateway won't be changed"
 
 PAT=$(re "$OLD"); SED=$(subst "$OLD" "$NEW")
 if [ -n "$NGW" ] && [ -n "$OGW" ] && [ "$NGW" != "$OGW" ]; then
@@ -89,31 +107,44 @@ if [ -n "$NGW" ] && [ -n "$OGW" ] && [ "$NGW" != "$OGW" ]; then
 fi
 
 BK=/root/ip-change-$(date +%Y%m%d-%H%M%S)
-mkdir -p "$BK" || die "не создать $BK"
+mkdir -p "$BK" || die "cannot create $BK"
 grep -rlE "$PAT" $PATHS 2>/dev/null | sort -u > "$BK/files"
-[ -s "$BK/files" ] || die "$OLD не найден в сетевых конфигах"
+[ -s "$BK/files" ] || die "$OLD not found in network configs"
 
-echo; echo "Будут изменены:"
+echo; echo "Files to change:"
 while IFS= read -r f; do echo "== $f"; grep -nE "$PAT" "$f"; done < "$BK/files"
 others=$(grep -rlE "$(re "$OLD")" /etc 2>/dev/null | grep -vxF -f "$BK/files")
-[ -n "$others" ] && printf '\nIP также есть здесь (НЕ меняю, проверь сервисы):\n%s\n' "$others"
-command -v ping >/dev/null 2>&1 && ping -c1 -W1 "$NEW" >/dev/null 2>&1 && echo "ВНИМАНИЕ: $NEW уже отвечает на ping"
+[ -n "$others" ] && printf '\nIP also found here (NOT changed, check these services):\n%s\n' "$others"
+command -v ping >/dev/null 2>&1 && ping -c1 -W1 "$NEW" >/dev/null 2>&1 && echo "WARNING: $NEW already answers ping"
 [ -d /etc/cloud ] && [ ! -f /etc/cloud/cloud-init.disabled ] &&
-  echo "ВНИМАНИЕ: cloud-init может вернуть старую сеть при ребуте"
+  echo "WARNING: cloud-init may restore the old network config on reboot"
 
-[ "$(ask "Применить? [y/N]: ")" = y ] || die "отменено"
+[ "$(ask "Apply? [y/N]: ")" = y ] || die "cancelled"
 
-tar -C / -cf "$BK/backup.tar" -T "$BK/files" 2>/dev/null || die "бэкап не удался"
+tar -C / -cf "$BK/backup.tar" -T "$BK/files" 2>/dev/null || die "backup failed"
 while IFS= read -r f; do sed -i -E "$SED" "$f"; done < "$BK/files"
 rm -f "$OK_FILE"
 
-# ponytail: trap HUP держит воркер после обрыва SSH; при KillUserProcesses=yes нужен systemd-run
+# ponytail: trap HUP keeps the worker alive after SSH drops; KillUserProcesses=yes would need systemd-run
 ( trap '' HUP INT; worker ) > "$BK/log" 2>&1 < /dev/null &
 
 echo
-echo "Бэкап и журнал: $BK"
+echo "Backup and log: $BK"
 if [ "$TIMEOUT" -gt 0 ]; then
-  echo "Сеть перезапускается. За ${TIMEOUT}с зайди по НОВОМУ IP ($NEW) и выполни:"
-  echo "  touch $OK_FILE"
-  echo "Иначе конфиги и сеть откатятся автоматически."
+  echo "If this session drops: log in via $NEW within ${TIMEOUT}s and run: touch $OK_FILE"
 fi
+echo "Restarting network..."
+while [ ! -f "$BK/applied" ]; do sleep 1; done
+ip -o -4 addr show scope global | awk '{ print "  " $2, $4 }'
+[ "$TIMEOUT" -eq 0 ] && exit 0
+
+ans=$(ask "Keep new settings? Press ENTER to accept, n to roll back (auto-rollback in ${TIMEOUT}s): ")
+if [ -f "$BK/done" ]; then
+  echo "Too late: $(cat "$BK/done")"; exit 1
+elif [ "$ans" = n ] || [ "$ans" = N ]; then
+  touch "$BK/revert"
+else
+  touch "$OK_FILE"
+fi
+while [ ! -f "$BK/done" ]; do sleep 1; done
+cat "$BK/done"
