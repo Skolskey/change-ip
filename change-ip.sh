@@ -40,6 +40,32 @@ drop_ip() {
   done
 }
 
+# ifupdown: NEW was a secondary stanza, now there are two iface blocks with NEW.
+# Keep one (the one with a gateway, else the first), drop the rest and their orphaned auto names.
+dedupe_ifaces() {
+  awk -v ip="$NEW" '
+    function key(l) { return l ~ /^[[:space:]]*(iface|auto|allow-[^ \t]*|mapping|source|source-directory)[[:space:]]/ }
+    NR == FNR {
+      if (key($0)) { blk = ($1 == "iface") ? ++n : 0; if (blk) { name[blk] = $2; named[$2] = 1 } }
+      else if (blk && $1 == "address") { a = $2; sub(/\/.*/, "", a); if (a == ip) has[blk] = 1 }
+      else if (blk && $1 == "gateway") gw[blk] = 1
+      next
+    }
+    FNR == 1 {
+      for (b = 1; b <= n; b++) if (has[b] && (!keep || (gw[b] && !gw[keep]))) keep = b
+      for (b = 1; b <= n; b++) if (has[b] && b != keep) drop[b] = 1; else alive[name[b]] = 1
+    }
+    key($0) { blk = ($1 == "iface") ? ++m : 0 }
+    blk && drop[blk] && $0 !~ /^[[:space:]]*(#|$)/ { next }
+    $1 == "auto" || $1 ~ /^allow-/ {
+      out = $1; for (i = 2; i <= NF; i++) if (!named[$i] || alive[$i]) out = out " " $i
+      if (out == $1) next
+      $0 = out
+    }
+    { print }
+  ' "$1" "$1"
+}
+
 restart_net() {
   if command -v netplan >/dev/null 2>&1 && ls /etc/netplan/*.yaml >/dev/null 2>&1; then
     netplan apply
@@ -133,9 +159,12 @@ tar -C / -cf "$BK/backup.tar" -T "$BK/files" 2>/dev/null || die "backup failed"
 while IFS= read -r f; do
   sed -i -E "$SED" "$f"
   # NEW may already be a secondary address: drop the duplicate netplan list entry
-  case $f in /etc/netplan/*)
-    awk -v ip="$NEW" '!(index($0, ip) && /^[[:space:]]*-/ && seen[$0]++)' "$f" > "$f.tmp" &&
-      cat "$f.tmp" > "$f"; rm -f "$f.tmp" ;;
+  case $f in
+    /etc/netplan/*)
+      awk -v ip="$NEW" '!(index($0, ip) && /^[[:space:]]*-/ && seen[$0]++)' "$f" > "$f.tmp" &&
+        cat "$f.tmp" > "$f"; rm -f "$f.tmp" ;;
+    /etc/network/interfaces*)
+      dedupe_ifaces "$f" > "$f.tmp" && cat "$f.tmp" > "$f"; rm -f "$f.tmp" ;;
   esac
 done < "$BK/files"
 rm -f "$OK_FILE"
